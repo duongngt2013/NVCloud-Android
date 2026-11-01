@@ -3,9 +3,6 @@ name: NVCloud Check
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -24,9 +21,11 @@ jobs:
         shell: bash
         run: |
           set -e
-          test -f README.md
-          test -f docker-compose.yml
-          test -f config/display.env
-          test -f scripts/check-host.sh
-          test -f scripts/start-android.sh
-          echo "NVCloud files: OK"
+          for file in README.md docker-compose.yml config/display.env scripts/check-host.sh scripts/start-android.sh; do
+            if [ -f "$file" ]; then
+              echo "[OK] $file"
+            else
+              echo "[MISSING] $file"
+              exit 1
+            fi
+          done
