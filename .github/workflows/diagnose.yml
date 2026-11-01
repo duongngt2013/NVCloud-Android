@@ -1,0 +1,41 @@
+
+name: NVCloud Host Diagnosis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check CPU and memory
+        run: |
+          echo "=== CPU ==="
+          nproc
+          lscpu
+          echo "=== MEMORY ==="
+          free -h
+          echo "=== DISK ==="
+          df -h /
+
+      - name: Check Docker
+        run: |
+          docker --version
+          docker info
+
+      - name: Check virtualization and Binder
+        run: |
+          echo "=== KVM ==="
+          ls -l /dev/kvm || true
+          echo "=== BINDER ==="
+          ls -l /dev/binder /dev/hwbinder /dev/vndbinder || true
+          echo "=== BINDER FILESYSTEM ==="
+          grep binder /proc/filesystems || true
+          echo "=== KERNEL ==="
+          uname -a
+          
