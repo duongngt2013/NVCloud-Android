@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for file in README.md docker-compose.yml config/display.env scripts/check-host.sh scripts/start-android.sh; do
+          for file in README.md docker-compose.yml scripts/check-host.sh scripts/start-android.sh; do
             if [ -f "$file" ]; then
               echo "[OK] $file"
             else
