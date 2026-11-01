@@ -1,0 +1,28 @@
+
+name: NVCloud Binder Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  binder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Test BinderFS
+        run: |
+          set +e
+          echo "=== MODULE ==="
+          sudo modprobe binder_linux devices=binder,hwbinder,vndbinder
+          echo "modprobe exit: $?"
+          echo "=== BINDERFS ==="
+          sudo mkdir -p /dev/binderfs
+          sudo mount -t binder binder /dev/binderfs
+          echo "mount exit: $?"
+          ls -la /dev/binderfs
+          echo "=== KERNEL CONFIG ==="
+          grep -E 'CONFIG_ANDROID_BINDER|CONFIG_ANDROID_BINDERFS' /boot/config-$(uname -r) || true
+          
