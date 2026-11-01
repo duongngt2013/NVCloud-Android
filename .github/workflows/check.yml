@@ -1,23 +1,32 @@
-name: NVCloud-Android Check
+
+name: NVCloud Check
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-validate:
-name: Validate project
-runs-on: ubuntu-latest
-timeout-minutes: 5
+  validate:
+    name: Validate repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Check project files
-    run: |
-      test -f README.md
-      echo "README.md exists"
-      echo "Project validation passed."
+      - name: Check required files
+        shell: bash
+        run: |
+          set -e
+          test -f README.md
+          test -f docker-compose.yml
+          test -f config/display.env
+          test -f scripts/check-host.sh
+          test -f scripts/start-android.sh
+          echo "NVCloud files: OK"
