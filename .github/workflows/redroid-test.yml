@@ -1,0 +1,68 @@
+
+name: NVCloud Redroid Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  redroid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Prepare BinderFS
+        run: |
+          set -eux
+          sudo mkdir -p /dev/binderfs
+          mountpoint -q /dev/binderfs || \
+            sudo mount -t binder binder /dev/binderfs
+          ls -la /dev/binderfs
+
+      - name: Start Android 13
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/redroid-data"
+          docker pull redroid/redroid:13.0.0-latest
+          docker run -d \
+            --name nvcloud-redroid \
+            --privileged \
+            -v "$RUNNER_TEMP/redroid-data:/data" \
+            -p 127.0.0.1:5555:5555 \
+            redroid/redroid:13.0.0-latest \
+            androidboot.use_memfd=1 \
+            androidboot.redroid_width=720 \
+            androidboot.redroid_height=1280 \
+            androidboot.redroid_dpi=240
+
+      - name: Wait for Android boot
+        run: |
+          set +e
+          sudo apt-get update -qq
+          sudo apt-get install -y android-tools-adb
+          adb connect 127.0.0.1:5555
+
+          for i in $(seq 1 36); do
+            STATE=$(adb -s 127.0.0.1:5555 shell \
+              getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            echo "Boot check $i: $STATE"
+            if [ "$STATE" = "1" ]; then
+              echo "ANDROID_BOOT_SUCCESS"
+              adb -s 127.0.0.1:5555 shell getprop ro.build.version.release
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "ANDROID_BOOT_FAILED"
+          docker logs nvcloud-redroid
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker logs nvcloud-redroid 2>/dev/null || true
+          docker rm -f nvcloud-redroid 2>/dev/null || true
+          
