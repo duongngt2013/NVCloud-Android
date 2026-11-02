@@ -1,5 +1,5 @@
 
-name: NVCloud Redroid Test
+name: NVCloud Android UI Check
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  redroid:
+  android-ui:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Prepare BinderFS
@@ -20,10 +20,7 @@ jobs:
           sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
           sudo mkdir -p /dev/binderfs
           sudo mount -t binder binder /dev/binderfs
-          echo "=== BinderFS devices ==="
           ls -la /dev/binderfs
-          echo "=== Binder module ==="
-          lsmod | grep binder
 
       - name: Start Android 13
         shell: bash
@@ -34,7 +31,7 @@ jobs:
           docker pull redroid/redroid:13.0.0-latest
 
           docker run -d \
-            --name nvcloud-redroid \
+            --name nvcloud-android \
             --privileged \
             -v "$RUNNER_TEMP/redroid-data:/data" \
             -v /dev/binderfs:/dev/binderfs \
@@ -45,49 +42,81 @@ jobs:
             androidboot.redroid_height=1280 \
             androidboot.redroid_dpi=240
 
-          echo "=== Container status ==="
-          docker ps -a
-
-          echo "=== Binder devices inside container ==="
-          docker exec nvcloud-redroid ls -la /dev/binderfs || true
-
-      - name: Wait for Android boot
+      - name: Check Android UI and APK support
         shell: bash
         run: |
           set -e
-
           sudo apt-get update -qq
           sudo apt-get install -y android-tools-adb
 
           adb connect 127.0.0.1:5555
 
-          for i in $(seq 1 36); do
+          STATE=""
+          for i in $(seq 1 60); do
             STATE=$(adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-
             echo "Boot check $i: $STATE"
-
-            if [ "$STATE" = "1" ]; then
-              echo "ANDROID_BOOT_SUCCESS"
-              echo "Android version:"
-              adb -s 127.0.0.1:5555 shell getprop ro.build.version.release
-              echo "Build:"
-              adb -s 127.0.0.1:5555 shell getprop ro.build.display.id
-              exit 0
-            fi
-
+            [ "$STATE" = "1" ] && break
             sleep 5
           done
 
-          echo "ANDROID_BOOT_FAILED"
-          echo "=== Container logs ==="
-          docker logs nvcloud-redroid
-          exit 1
+          if [ "$STATE" != "1" ]; then
+            echo "ANDROID_BOOT_FAILED"
+            docker logs nvcloud-android
+            exit 1
+          fi
+
+          mkdir -p output
+
+          echo "=== ANDROID VERSION ==="
+          adb shell getprop ro.build.version.release
+
+          echo "=== LAUNCHER ==="
+          adb shell cmd package resolve-activity --brief \
+            -a android.intent.action.MAIN \
+            -c android.intent.category.HOME || true
+
+          echo "=== SYSTEM UI ==="
+          adb shell pm list packages | grep -E \
+            'systemui|settings|launcher|packageinstaller' || true
+
+          echo "=== APK INSTALLER ==="
+          adb shell pm list packages | grep -E \
+            'packageinstaller|packageinstaller2' || true
+
+          echo "=== STORAGE ==="
+          adb shell df -h /data
+
+          echo "=== NETWORK ==="
+          adb shell ip addr
+
+          echo "=== INSTALLED APPS ==="
+          adb shell pm list packages
+
+          echo "=== DISPLAY ==="
+          adb shell wm size
+          adb shell wm density
+
+          echo "=== SCREENSHOT ==="
+          adb shell input keyevent 82 || true
+          sleep 3
+          adb exec-out screencap -p > output/android-screen.png
+
+          echo "=== APK INSTALL CAPABILITY ==="
+          adb shell pm help | grep -m 1 install || true
+
+          echo "ANDROID_UI_CHECK_COMPLETE"
+
+      - name: Upload Android screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvcloud-android-screen
+          path: output/android-screen.png
+          if-no-files-found: warn
 
       - name: Cleanup
         if: always()
         shell: bash
         run: |
-          echo "=== Final container logs ==="
-          docker logs nvcloud-redroid 2>/dev/null || true
-
-          docker rm -f nvcloud-redroid 2>/dev/null || true
+          docker logs nvcloud-android 2>/dev/null || true
+          docker rm -f nvcloud-android 2>/dev/null || true
