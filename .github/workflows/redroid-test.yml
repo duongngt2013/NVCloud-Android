@@ -27,7 +27,6 @@ jobs:
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/redroid-data"
-
           docker pull redroid/redroid:13.0.0-latest
 
           docker run -d \
@@ -50,10 +49,11 @@ jobs:
           sudo apt-get install -y android-tools-adb
 
           adb connect 127.0.0.1:5555
+          DEVICE="127.0.0.1:5555"
 
           STATE=""
           for i in $(seq 1 60); do
-            STATE=$(adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            STATE=$(adb -s "$DEVICE" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             echo "Boot check $i: $STATE"
             [ "$STATE" = "1" ] && break
             sleep 5
@@ -68,41 +68,44 @@ jobs:
           mkdir -p output
 
           echo "=== ANDROID VERSION ==="
-          adb shell getprop ro.build.version.release
+          adb -s "$DEVICE" shell getprop ro.build.version.release
+
+          echo "=== DEVICE MODEL ==="
+          adb -s "$DEVICE" shell getprop ro.product.model
 
           echo "=== LAUNCHER ==="
-          adb shell cmd package resolve-activity --brief \
+          adb -s "$DEVICE" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN \
             -c android.intent.category.HOME || true
 
           echo "=== SYSTEM UI ==="
-          adb shell pm list packages | grep -E \
+          adb -s "$DEVICE" shell pm list packages | grep -E \
             'systemui|settings|launcher|packageinstaller' || true
 
           echo "=== APK INSTALLER ==="
-          adb shell pm list packages | grep -E \
+          adb -s "$DEVICE" shell pm list packages | grep -E \
             'packageinstaller|packageinstaller2' || true
 
           echo "=== STORAGE ==="
-          adb shell df -h /data
+          adb -s "$DEVICE" shell df -h /data
 
           echo "=== NETWORK ==="
-          adb shell ip addr
+          adb -s "$DEVICE" shell ip addr
 
           echo "=== INSTALLED APPS ==="
-          adb shell pm list packages
+          adb -s "$DEVICE" shell pm list packages
 
           echo "=== DISPLAY ==="
-          adb shell wm size
-          adb shell wm density
+          adb -s "$DEVICE" shell wm size
+          adb -s "$DEVICE" shell wm density
 
           echo "=== SCREENSHOT ==="
-          adb shell input keyevent 82 || true
           sleep 3
-          adb exec-out screencap -p > output/android-screen.png
+          adb -s "$DEVICE" exec-out screencap -p > output/android-screen.png
+          file output/android-screen.png
 
           echo "=== APK INSTALL CAPABILITY ==="
-          adb shell pm help | grep -m 1 install || true
+          adb -s "$DEVICE" shell pm help | grep -m 1 install || true
 
           echo "ANDROID_UI_CHECK_COMPLETE"
 
