@@ -1,5 +1,5 @@
 
-name: NVCloud Android UI Check
+name: NVCloud Launcher Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  android-ui:
+  launcher:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -27,6 +27,7 @@ jobs:
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/redroid-data"
+
           docker pull redroid/redroid:13.0.0-latest
 
           docker run -d \
@@ -41,15 +42,16 @@ jobs:
             androidboot.redroid_height=1280 \
             androidboot.redroid_dpi=240
 
-      - name: Check Android UI and APK support
+      - name: Install Lawnchair
         shell: bash
         run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y android-tools-adb
+          set -eux
 
-          adb connect 127.0.0.1:5555
+          sudo apt-get update -qq
+          sudo apt-get install -y android-tools-adb aapt jq
+
           DEVICE="127.0.0.1:5555"
+          adb connect "$DEVICE"
 
           STATE=""
           for i in $(seq 1 60); do
@@ -67,54 +69,58 @@ jobs:
 
           mkdir -p output
 
-          echo "=== ANDROID VERSION ==="
-          adb -s "$DEVICE" shell getprop ro.build.version.release
+          API="https://api.github.com/repos/LawnchairLauncher/lawnchair/releases/tags/v14.0.0-beta3"
 
-          echo "=== DEVICE MODEL ==="
-          adb -s "$DEVICE" shell getprop ro.product.model
+          curl -fsSL "$API" -o output/release.json
 
-          echo "=== LAUNCHER ==="
+          APK_URL=$(jq -r '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty' output/release.json)
+
+          if [ -z "$APK_URL" ]; then
+            echo "LAWNCHAIR_APK_NOT_FOUND"
+            jq -r '.assets[].name' output/release.json
+            exit 1
+          fi
+
+          curl -fL "$APK_URL" -o output/lawnchair.apk
+
+          echo "=== APK INFO ==="
+          aapt dump badging output/lawnchair.apk | head -n 5
+
+          echo "=== INSTALL ==="
+          adb -s "$DEVICE" install -r output/lawnchair.apk
+
+          PACKAGE=$(aapt dump badging output/lawnchair.apk | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          ACTIVITY=$(aapt dump badging output/lawnchair.apk | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+
+          echo "Package: $PACKAGE"
+          echo "Activity: $ACTIVITY"
+
+          if [ -z "$PACKAGE" ] || [ -z "$ACTIVITY" ]; then
+            echo "LAUNCHER_ACTIVITY_NOT_FOUND"
+            exit 1
+          fi
+
+          adb -s "$DEVICE" shell am start -n "$PACKAGE/$ACTIVITY"
+          sleep 5
+          adb -s "$DEVICE" shell input keyevent HOME
+          sleep 3
+
+          echo "=== HOME RESOLVER ==="
           adb -s "$DEVICE" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN \
             -c android.intent.category.HOME || true
 
-          echo "=== SYSTEM UI ==="
-          adb -s "$DEVICE" shell pm list packages | grep -E \
-            'systemui|settings|launcher|packageinstaller' || true
-
-          echo "=== APK INSTALLER ==="
-          adb -s "$DEVICE" shell pm list packages | grep -E \
-            'packageinstaller|packageinstaller2' || true
-
-          echo "=== STORAGE ==="
-          adb -s "$DEVICE" shell df -h /data
-
-          echo "=== NETWORK ==="
-          adb -s "$DEVICE" shell ip addr
-
-          echo "=== INSTALLED APPS ==="
-          adb -s "$DEVICE" shell pm list packages
-
-          echo "=== DISPLAY ==="
-          adb -s "$DEVICE" shell wm size
-          adb -s "$DEVICE" shell wm density
-
           echo "=== SCREENSHOT ==="
-          sleep 3
-          adb -s "$DEVICE" exec-out screencap -p > output/android-screen.png
-          file output/android-screen.png
+          adb -s "$DEVICE" exec-out screencap -p > output/lawnchair-screen.png
 
-          echo "=== APK INSTALL CAPABILITY ==="
-          adb -s "$DEVICE" shell pm help | grep -m 1 install || true
+          echo "LAUNCHER_TEST_COMPLETE"
 
-          echo "ANDROID_UI_CHECK_COMPLETE"
-
-      - name: Upload Android screenshot
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nvcloud-android-screen
-          path: output/android-screen.png
+          name: nvcloud-launcher-test
+          path: output/
           if-no-files-found: warn
 
       - name: Cleanup
