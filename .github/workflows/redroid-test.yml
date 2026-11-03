@@ -27,7 +27,6 @@ jobs:
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/redroid-data"
-
           docker pull redroid/redroid:13.0.0-latest
 
           docker run -d \
@@ -42,7 +41,7 @@ jobs:
             androidboot.redroid_height=1280 \
             androidboot.redroid_dpi=240
 
-      - name: Install Lawnchair
+      - name: Install and set Lawnchair as Home
         shell: bash
         run: |
           set -eux
@@ -70,50 +69,45 @@ jobs:
           mkdir -p output
 
           API="https://api.github.com/repos/LawnchairLauncher/lawnchair/releases/tags/v14.0.0-beta3"
-
           curl -fsSL "$API" -o output/release.json
 
           APK_URL=$(jq -r '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty' output/release.json)
 
           if [ -z "$APK_URL" ]; then
             echo "LAWNCHAIR_APK_NOT_FOUND"
-            jq -r '.assets[].name' output/release.json
             exit 1
           fi
 
           curl -fL "$APK_URL" -o output/lawnchair.apk
 
-          echo "=== APK INFO ==="
-          aapt dump badging output/lawnchair.apk | head -n 5
-
-          echo "=== INSTALL ==="
+          echo "=== INSTALL APK ==="
           adb -s "$DEVICE" install -r output/lawnchair.apk
 
-          PACKAGE=$(aapt dump badging output/lawnchair.apk | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-          ACTIVITY=$(aapt dump badging output/lawnchair.apk | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+          echo "=== SET DEFAULT HOME ==="
+          adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher
 
-          echo "Package: $PACKAGE"
-          echo "Activity: $ACTIVITY"
-
-          if [ -z "$PACKAGE" ] || [ -z "$ACTIVITY" ]; then
-            echo "LAUNCHER_ACTIVITY_NOT_FOUND"
-            exit 1
-          fi
-
-          adb -s "$DEVICE" shell am start -n "$PACKAGE/$ACTIVITY"
-          sleep 5
-          adb -s "$DEVICE" shell input keyevent HOME
-          sleep 3
-
-          echo "=== HOME RESOLVER ==="
+          echo "=== HOME ACTIVITY ==="
           adb -s "$DEVICE" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN \
-            -c android.intent.category.HOME || true
+            -c android.intent.category.HOME
+
+          echo "=== OPEN HOME ==="
+          adb -s "$DEVICE" shell am force-stop com.android.launcher3
+          adb -s "$DEVICE" shell am start \
+            -a android.intent.action.MAIN \
+            -c android.intent.category.HOME
+
+          sleep 5
+
+          echo "=== VERIFY HOME ==="
+          adb -s "$DEVICE" shell cmd package resolve-activity --brief \
+            -a android.intent.action.MAIN \
+            -c android.intent.category.HOME
 
           echo "=== SCREENSHOT ==="
           adb -s "$DEVICE" exec-out screencap -p > output/lawnchair-screen.png
 
-          echo "LAUNCHER_TEST_COMPLETE"
+          echo "LAWNCHAIR_HOME_TEST_COMPLETE"
 
       - name: Upload test results
         if: always()
