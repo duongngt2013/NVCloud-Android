@@ -14,6 +14,7 @@ jobs:
 
     steps:
       - name: Prepare BinderFS
+        shell: bash
         run: |
           set -eux
           sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
@@ -22,6 +23,7 @@ jobs:
           ls -la /dev/binderfs
 
       - name: Start Android 13
+        shell: bash
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/redroid-data"
@@ -77,20 +79,24 @@ jobs:
 
           curl -fL "$APK_URL" -o output/lawnchair.apk
 
+          echo "=== INSTALL APK ==="
           adb -s "$DEVICE" install -r output/lawnchair.apk
 
           echo "=== SET DEFAULT HOME ==="
           adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher || true
 
           echo "=== OPEN LAWNCHAIR ==="
+          adb -s "$DEVICE" shell am force-stop app.lawnchair
           adb -s "$DEVICE" shell am start -n app.lawnchair/.LawnchairLauncher
           sleep 5
 
-          echo "=== INITIAL SCREEN ==="
+          echo "=== SCREEN BEFORE SETUP ==="
           adb -s "$DEVICE" exec-out screencap -p > output/01-before-setup.png
 
-          echo "=== TAP INITIAL SETUP ==="
-          adb -s "$DEVICE" shell input tap 150 110
+          echo "=== TAP SETUP BUTTON ==="
+          adb -s "$DEVICE" shell input tap 105 110
+          sleep 3
+          adb -s "$DEVICE" shell input tap 105 110
           sleep 5
 
           echo "=== PRESS HOME ==="
@@ -102,15 +108,15 @@ jobs:
             -a android.intent.action.MAIN \
             -c android.intent.category.HOME || true
 
-          echo "=== FINAL SCREEN ==="
+          echo "=== SCREEN AFTER SETUP ==="
           adb -s "$DEVICE" exec-out screencap -p > output/02-after-setup.png
 
-          echo "=== LAUNCHER PACKAGE ==="
+          echo "=== LAWNCHAIR PACKAGE ==="
           adb -s "$DEVICE" shell dumpsys package app.lawnchair | grep -m 5 "versionName" || true
 
           echo "LAWNCHAIR_SETUP_TEST_COMPLETE"
 
-      - name: Upload screenshots
+      - name: Upload screenshots and APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -120,6 +126,7 @@ jobs:
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
           docker logs nvcloud-android 2>/dev/null || true
           docker rm -f nvcloud-android 2>/dev/null || true
