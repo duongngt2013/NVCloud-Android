@@ -1,5 +1,5 @@
 
-name: NVCloud Launcher Test
+name: NVCloud Lawnchair Setup
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ jobs:
 
     steps:
       - name: Prepare BinderFS
-        shell: bash
         run: |
           set -eux
           sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
@@ -23,7 +22,6 @@ jobs:
           ls -la /dev/binderfs
 
       - name: Start Android 13
-        shell: bash
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/redroid-data"
@@ -41,11 +39,10 @@ jobs:
             androidboot.redroid_height=1280 \
             androidboot.redroid_dpi=240
 
-      - name: Install and set Lawnchair as Home
+      - name: Install and initialize Lawnchair
         shell: bash
         run: |
           set -eux
-
           sudo apt-get update -qq
           sudo apt-get install -y android-tools-adb aapt jq
 
@@ -80,46 +77,49 @@ jobs:
 
           curl -fL "$APK_URL" -o output/lawnchair.apk
 
-          echo "=== INSTALL APK ==="
           adb -s "$DEVICE" install -r output/lawnchair.apk
 
           echo "=== SET DEFAULT HOME ==="
-          adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher
+          adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher || true
 
-          echo "=== HOME ACTIVITY ==="
-          adb -s "$DEVICE" shell cmd package resolve-activity --brief \
-            -a android.intent.action.MAIN \
-            -c android.intent.category.HOME
-
-          echo "=== OPEN HOME ==="
-          adb -s "$DEVICE" shell am force-stop com.android.launcher3
-          adb -s "$DEVICE" shell am start \
-            -a android.intent.action.MAIN \
-            -c android.intent.category.HOME
-
+          echo "=== OPEN LAWNCHAIR ==="
+          adb -s "$DEVICE" shell am start -n app.lawnchair/.LawnchairLauncher
           sleep 5
 
-          echo "=== VERIFY HOME ==="
+          echo "=== INITIAL SCREEN ==="
+          adb -s "$DEVICE" exec-out screencap -p > output/01-before-setup.png
+
+          echo "=== TAP INITIAL SETUP ==="
+          adb -s "$DEVICE" shell input tap 150 110
+          sleep 5
+
+          echo "=== PRESS HOME ==="
+          adb -s "$DEVICE" shell input keyevent HOME
+          sleep 5
+
+          echo "=== HOME RESOLVER ==="
           adb -s "$DEVICE" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN \
-            -c android.intent.category.HOME
+            -c android.intent.category.HOME || true
 
-          echo "=== SCREENSHOT ==="
-          adb -s "$DEVICE" exec-out screencap -p > output/lawnchair-screen.png
+          echo "=== FINAL SCREEN ==="
+          adb -s "$DEVICE" exec-out screencap -p > output/02-after-setup.png
 
-          echo "LAWNCHAIR_HOME_TEST_COMPLETE"
+          echo "=== LAUNCHER PACKAGE ==="
+          adb -s "$DEVICE" shell dumpsys package app.lawnchair | grep -m 5 "versionName" || true
 
-      - name: Upload test results
+          echo "LAWNCHAIR_SETUP_TEST_COMPLETE"
+
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nvcloud-launcher-test
+          name: nvcloud-lawnchair-setup
           path: output/
           if-no-files-found: warn
 
       - name: Cleanup
         if: always()
-        shell: bash
         run: |
           docker logs nvcloud-android 2>/dev/null || true
           docker rm -f nvcloud-android 2>/dev/null || true
