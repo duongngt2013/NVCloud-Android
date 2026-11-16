@@ -18,7 +18,6 @@ jobs:
 
     env:
       BLOMP_BUCKET: duongngt2013-at-gmail.com
-      RCLONE_CONFIG: ${{ runner.temp }}/rclone.conf
       BACKUP_DIR: nvcloud/backups
       DEVICE: 127.0.0.1:5555
 
