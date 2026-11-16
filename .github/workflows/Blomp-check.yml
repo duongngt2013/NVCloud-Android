@@ -1,0 +1,96 @@
+
+name: NVCloud - Blomp Connection Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-blomp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      BLOMP_BUCKET: duongngt2013-at-gmail.com
+
+    steps:
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y rclone
+          rclone version
+
+      - name: Configure Blomp S3
+        shell: bash
+        env:
+          BLOMP_ACCESS_KEY: ${{ secrets.BLOMP_ACCESS_KEY }}
+          BLOMP_SECRET_KEY: ${{ secrets.BLOMP_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BLOMP_ACCESS_KEY" ] || [ -z "$BLOMP_SECRET_KEY" ]; then
+            echo "ERROR: Missing GitHub Secrets"
+            exit 1
+          fi
+
+          echo "::add-mask::$BLOMP_ACCESS_KEY"
+          echo "::add-mask::$BLOMP_SECRET_KEY"
+
+          rclone config create blomp s3 \
+            provider Other \
+            access_key_id "$BLOMP_ACCESS_KEY" \
+            secret_access_key "$BLOMP_SECRET_KEY" \
+            region us-east-1 \
+            endpoint https://storage.blomp.com \
+            >/dev/null
+
+          echo "BLOMP_CONFIGURED"
+
+      - name: Test bucket access
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== LIST BUCKETS ==="
+          rclone lsd blomp:
+
+          echo "=== CHECK TARGET BUCKET ==="
+          rclone lsf "blomp:${BLOMP_BUCKET}" --max-depth 1
+
+          echo "BUCKET_ACCESS_OK"
+
+      - name: Test upload and download
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEST_FILE="$RUNNER_TEMP/nvcloud-test.txt"
+          REMOTE_FILE="blomp:${BLOMP_BUCKET}/.nvcloud-test-${GITHUB_RUN_ID}.txt"
+
+          cleanup() {
+            rclone deletefile "$REMOTE_FILE" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          printf 'NVCloud Blomp connectivity test\nRun: %s\n' \
+            "$GITHUB_RUN_ID" > "$TEST_FILE"
+
+          echo "=== UPLOAD TEST ==="
+          rclone copyto "$TEST_FILE" "$REMOTE_FILE"
+
+          echo "=== DOWNLOAD TEST ==="
+          rclone cat "$REMOTE_FILE" | cmp - "$TEST_FILE"
+
+          echo "=== DELETE TEST ==="
+          rclone deletefile "$REMOTE_FILE"
+
+          trap - EXIT
+          echo "BLOMP_READ_WRITE_OK"
+
+      - name: Result
+        if: success()
+        run: echo "NVCloud_BLOMP_TEST_SUCCESS"
