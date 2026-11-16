@@ -1,0 +1,341 @@
+
+name: NVCloud - Start Android Cloud
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nvcloud-cloud
+  cancel-in-progress: false
+
+jobs:
+  cloud:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    env:
+      BLOMP_BUCKET: duongngt2013-at-gmail.com
+      RCLONE_CONFIG: ${{ runner.temp }}/rclone.conf
+      BACKUP_DIR: nvcloud/backups
+      DEVICE: 127.0.0.1:5555
+
+    steps:
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            rclone \
+            zstd \
+            android-tools-adb \
+            curl \
+            jq
+
+      - name: Configure Blomp
+        shell: bash
+        env:
+          BLOMP_ACCESS_KEY: ${{ secrets.BLOMP_ACCESS_KEY }}
+          BLOMP_SECRET_KEY: ${{ secrets.BLOMP_SECRET_KEY }}
+        run: |
+          set -e
+          set +x
+
+          if [ -z "$BLOMP_ACCESS_KEY" ] || [ -z "$BLOMP_SECRET_KEY" ]; then
+            echo "BLOMP_SECRETS_MISSING"
+            exit 1
+          fi
+
+          rclone config create blomp s3 \
+            provider=Other \
+            endpoint=https://storage.blomp.com \
+            region=us-east-1 \
+            access_key_id="$BLOMP_ACCESS_KEY" \
+            secret_access_key="$BLOMP_SECRET_KEY"
+
+          rclone lsd blomp:
+
+          echo "BLOMP_CONNECTED"
+
+      - name: Restore previous Android data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/redroid-data"
+
+          LATEST="$BACKUP_DIR/LATEST"
+
+          if ! rclone copyto \
+            "blomp:$BLOMP_BUCKET/$LATEST" \
+            "$RUNNER_TEMP/LATEST"; then
+            echo "NO_PREVIOUS_BACKUP"
+            exit 0
+          fi
+
+          BACKUP_NAME=$(cat "$RUNNER_TEMP/LATEST")
+
+          if [[ ! "$BACKUP_NAME" =~ ^nvcloud-[0-9]+\.tar\.zst$ ]]; then
+            echo "INVALID_BACKUP_POINTER"
+            exit 1
+          fi
+
+          echo "Restoring: $BACKUP_NAME"
+
+          rclone copyto \
+            "blomp:$BLOMP_BUCKET/$BACKUP_DIR/$BACKUP_NAME" \
+            "$RUNNER_TEMP/nvcloud-backup.tar.zst"
+
+          zstd -t "$RUNNER_TEMP/nvcloud-backup.tar.zst"
+
+          sudo tar \
+            --numeric-owner \
+            --same-owner \
+            --same-permissions \
+            --zstd \
+            -xf "$RUNNER_TEMP/nvcloud-backup.tar.zst" \
+            -C "$RUNNER_TEMP/redroid-data"
+
+          echo "RESTORE_COMPLETE"
+
+      - name: Prepare BinderFS
+        shell: bash
+        run: |
+          set -eux
+
+          sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+
+          sudo mkdir -p /dev/binderfs
+
+          if ! mountpoint -q /dev/binderfs; then
+            sudo mount -t binder binder /dev/binderfs
+          fi
+
+          ls -la /dev/binderfs
+
+      - name: Start Android 13
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull redroid/redroid:13.0.0-latest
+
+          docker run -d \
+            --name nvcloud-android \
+            --privileged \
+            --restart=no \
+            -v "$RUNNER_TEMP/redroid-data:/data" \
+            -v /dev/binderfs:/dev/binderfs \
+            -p 127.0.0.1:5555:5555 \
+            redroid/redroid:13.0.0-latest \
+            androidboot.use_memfd=1 \
+            androidboot.redroid_width=720 \
+            androidboot.redroid_height=1280 \
+            androidboot.redroid_dpi=240
+
+      - name: Connect ADB and initialize Android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          adb connect "$DEVICE"
+
+          STATE=""
+
+          for i in $(seq 1 60); do
+            STATE=$(adb -s "$DEVICE" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            echo "Boot check $i: $STATE"
+
+            if [ "$STATE" = "1" ]; then
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [ "$STATE" != "1" ]; then
+            docker logs nvcloud-android
+            echo "ANDROID_BOOT_FAILED"
+            exit 1
+          fi
+
+          echo "ANDROID_BOOT_OK"
+
+      - name: Check root
+        shell: bash
+        run: |
+          set +e
+
+          adb -s "$DEVICE" root
+          sleep 3
+
+          echo "=== ADB IDENTITY ==="
+          adb -s "$DEVICE" shell id
+
+          echo "=== BUILD TYPE ==="
+          adb -s "$DEVICE" shell getprop ro.build.type
+
+          echo "=== SU LOCATION ==="
+          adb -s "$DEVICE" shell which su
+
+          echo "=== SU TEST ==="
+          adb -s "$DEVICE" shell su -c id
+
+          echo "ROOT_DIAGNOSTIC_COMPLETE"
+
+      - name: Install Lawnchair if missing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if adb -s "$DEVICE" shell pm path app.lawnchair | grep -q package:; then
+            echo "LAWNCHAIR_ALREADY_INSTALLED"
+          else
+            PAGE="$RUNNER_TEMP/lawnchair.html"
+            APK="$RUNNER_TEMP/lawnchair.apk"
+
+            curl -fsSL \
+              "https://github.com/LawnchairLauncher/lawnchair/releases/expanded_assets/v14.0.0-beta3" \
+              -o "$PAGE"
+
+            APK_PATH=$(grep -oE 'href="[^"]+\.apk"' "$PAGE" \
+              | head -n 1 \
+              | cut -d '"' -f 2)
+
+            if [ -z "$APK_PATH" ]; then
+              echo "LAWNCHAIR_APK_NOT_FOUND"
+              exit 1
+            fi
+
+            case "$APK_PATH" in
+              http*) APK_URL="$APK_PATH" ;;
+              *) APK_URL="https://github.com$APK_PATH" ;;
+            esac
+
+            curl -fL "$APK_URL" -o "$APK"
+
+            adb -s "$DEVICE" install -r "$APK"
+
+            rm -f "$APK" "$PAGE"
+          fi
+
+          adb -s "$DEVICE" shell cmd package set-home-activity \
+            --user 0 app.lawnchair/.LawnchairLauncher || true
+
+          adb -s "$DEVICE" shell am force-stop app.lawnchair
+
+          adb -s "$DEVICE" shell am start \
+            -n app.lawnchair/.LawnchairLauncher
+
+          sleep 5
+
+          adb -s "$DEVICE" exec-out screencap -p \
+            > "$RUNNER_TEMP/nvcloud-screen.png"
+
+          echo "LAWNCHAIR_READY"
+
+      - name: Keep Cloud running and backup on exit
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          DATA="$RUNNER_TEMP/redroid-data"
+          ARCHIVE="$RUNNER_TEMP/nvcloud-backup.tar.zst"
+          BACKUP_NAME="nvcloud-${GITHUB_RUN_ID}.tar.zst"
+          BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+
+          backup() {
+            set +e
+            trap - EXIT
+
+            echo "=== STOP ANDROID ==="
+
+            docker stop -t 30 nvcloud-android 2>/dev/null || true
+
+            if [ ! -d "$DATA" ]; then
+              echo "NO_ANDROID_DATA"
+              return 0
+            fi
+
+            echo "=== DATA SIZE ==="
+            sudo du -sh "$DATA"
+
+            echo "=== CREATE ARCHIVE ==="
+
+            sudo tar \
+              --numeric-owner \
+              --acls \
+              --xattrs \
+              -I 'zstd -1 -T2' \
+              -cf "$ARCHIVE" \
+              -C "$DATA" .
+
+            if [ ! -s "$ARCHIVE" ]; then
+              echo "BACKUP_ARCHIVE_EMPTY"
+              return 1
+            fi
+
+            zstd -t "$ARCHIVE" || return 1
+
+            echo "=== UPLOAD BACKUP ==="
+
+            rclone copyto \
+              "$ARCHIVE" \
+              "blomp:$BLOMP_BUCKET/$BACKUP_PATH" \
+              --s3-chunk-size 100M \
+              --transfers 1 \
+              --checkers 2 \
+              --retries 3 \
+              --low-level-retries 5 \
+              || return 1
+
+            echo "=== VERIFY REMOTE SIZE ==="
+
+            LOCAL_SIZE=$(stat -c %s "$ARCHIVE")
+            REMOTE_SIZE=$(rclone lsjson \
+              "blomp:$BLOMP_BUCKET/$BACKUP_PATH" \
+              | jq -r '.[0].Size')
+
+            if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
+              echo "BACKUP_SIZE_MISMATCH"
+              return 1
+            fi
+
+            echo "$BACKUP_NAME" > "$RUNNER_TEMP/LATEST"
+
+            rclone copyto \
+              "$RUNNER_TEMP/LATEST" \
+              "blomp:$BLOMP_BUCKET/$BACKUP_DIR/LATEST" \
+              || return 1
+
+            echo "NVCloud_BACKUP_OK"
+          }
+
+          trap backup EXIT
+
+          if [ "${{ job.status }}" != "success" ]; then
+            echo "Workflow setup did not complete successfully."
+            exit 1
+          fi
+
+          echo "================================"
+          echo "NVCloud Android 13 is running"
+          echo "Session limit: 350 minutes"
+          echo "================================"
+
+          END=$((SECONDS + 5 * 60 * 60 + 50 * 60))
+
+          while [ "$SECONDS" -lt "$END" ]; do
+            if ! docker inspect -f '{{.State.Running}}' nvcloud-android 2>/dev/null | grep -q true; then
+              echo "ANDROID_CONTAINER_STOPPED"
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "SESSION_TIME_LIMIT_REACHED"
