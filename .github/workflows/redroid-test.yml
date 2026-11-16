@@ -1,5 +1,5 @@
 
-name: NVCloud Lawnchair Setup
+name: NVCloud Android 13 Setup
 
 on:
   workflow_dispatch:
@@ -13,6 +13,11 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Prepare output
+        shell: bash
+        run: |
+          mkdir -p output "$RUNNER_TEMP/nvcloud"
+
       - name: Prepare BinderFS
         shell: bash
         run: |
@@ -45,6 +50,8 @@ jobs:
         shell: bash
         run: |
           set -eux
+          exec > >(tee -a output/setup.log) 2>&1
+
           sudo apt-get update -qq
           sudo apt-get install -y android-tools-adb aapt jq
 
@@ -65,22 +72,26 @@ jobs:
             exit 1
           fi
 
-          mkdir -p output
-
           API="https://api.github.com/repos/LawnchairLauncher/lawnchair/releases/tags/v14.0.0-beta3"
-          curl -fsSL "$API" -o output/release.json
+          RELEASE_JSON="$RUNNER_TEMP/lawnchair-release.json"
+          APK="$RUNNER_TEMP/lawnchair.apk"
 
-          APK_URL=$(jq -r '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty' output/release.json)
+          curl -fsSL "$API" -o "$RELEASE_JSON"
+
+          APK_URL=$(jq -r '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty' "$RELEASE_JSON")
 
           if [ -z "$APK_URL" ]; then
             echo "LAWNCHAIR_APK_NOT_FOUND"
             exit 1
           fi
 
-          curl -fL "$APK_URL" -o output/lawnchair.apk
+          curl -fL "$APK_URL" -o "$APK"
 
           echo "=== INSTALL APK ==="
-          adb -s "$DEVICE" install -r output/lawnchair.apk
+          adb -s "$DEVICE" install -r "$APK"
+
+          echo "=== REMOVE TEMPORARY APK ==="
+          rm -f "$APK" "$RELEASE_JSON"
 
           echo "=== SET DEFAULT HOME ==="
           adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher || true
@@ -116,17 +127,33 @@ jobs:
 
           echo "LAWNCHAIR_SETUP_TEST_COMPLETE"
 
-      - name: Upload screenshots and APK
+      - name: Collect Android logs
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "=== DOCKER LOGS ==="
+            docker logs nvcloud-android 2>&1 || true
+
+            echo "=== ANDROID LOGCAT ==="
+            adb -s 127.0.0.1:5555 logcat -d -t 1500 2>&1 || true
+          } >> output/setup.log
+
+      - name: Upload screenshots and logs only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nvcloud-lawnchair-setup
-          path: output/
+          name: nvcloud-android-results
+          path: |
+            output/*.png
+            output/*.txt
+            output/*.log
           if-no-files-found: warn
 
       - name: Cleanup
         if: always()
         shell: bash
         run: |
-          docker logs nvcloud-android 2>/dev/null || true
           docker rm -f nvcloud-android 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/lawnchair.apk"
+          rm -f "$RUNNER_TEMP/lawnchair-release.json"
