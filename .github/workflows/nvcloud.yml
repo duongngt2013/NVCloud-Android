@@ -28,11 +28,7 @@ jobs:
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y \
-            rclone \
-            zstd \
-            android-tools-adb \
-            curl \
-            jq
+            rclone zstd android-tools-adb curl jq
 
       - name: Configure Blomp
         shell: bash
@@ -40,7 +36,7 @@ jobs:
           BLOMP_ACCESS_KEY: ${{ secrets.BLOMP_ACCESS_KEY }}
           BLOMP_SECRET_KEY: ${{ secrets.BLOMP_SECRET_KEY }}
         run: |
-          set -e
+          set -euo pipefail
           set +x
 
           if [ -z "$BLOMP_ACCESS_KEY" ] || [ -z "$BLOMP_SECRET_KEY" ]; then
@@ -56,7 +52,6 @@ jobs:
             secret_access_key="$BLOMP_SECRET_KEY"
 
           rclone lsd blomp:
-
           echo "BLOMP_CONNECTED"
 
       - name: Restore previous Android data
@@ -64,39 +59,55 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/redroid-data"
+          DATA="$RUNNER_TEMP/redroid-data"
+          REMOTE="blomp:$BLOMP_BUCKET/$BACKUP_DIR"
+          LIST="$RUNNER_TEMP/backup-list.txt"
+          LATEST="$RUNNER_TEMP/LATEST"
+          ARCHIVE="$RUNNER_TEMP/nvcloud-backup.tar.zst"
 
-          LATEST="$BACKUP_DIR/LATEST"
+          mkdir -p "$DATA"
 
-          if ! rclone copyto \
-            "blomp:$BLOMP_BUCKET/$LATEST" \
-            "$RUNNER_TEMP/LATEST"; then
+          # Listing failure is an error, not an empty backup.
+          rclone lsf "$REMOTE/" > "$LIST"
+
+          if ! grep -Fxq "LATEST" "$LIST"; then
             echo "NO_PREVIOUS_BACKUP"
+            echo "Creating a new Android data directory."
             exit 0
           fi
 
-          BACKUP_NAME=$(cat "$RUNNER_TEMP/LATEST")
+          rclone cat "$REMOTE/LATEST" > "$LATEST"
+
+          if [ ! -s "$LATEST" ]; then
+            echo "LATEST_POINTER_EMPTY"
+            exit 1
+          fi
+
+          BACKUP_NAME=$(tr -d '\r\n' < "$LATEST")
 
           if [[ ! "$BACKUP_NAME" =~ ^nvcloud-[0-9]+\.tar\.zst$ ]]; then
             echo "INVALID_BACKUP_POINTER"
             exit 1
           fi
 
-          echo "Restoring: $BACKUP_NAME"
+          echo "Restoring $BACKUP_NAME"
 
-          rclone copyto \
-            "blomp:$BLOMP_BUCKET/$BACKUP_DIR/$BACKUP_NAME" \
-            "$RUNNER_TEMP/nvcloud-backup.tar.zst"
+          rclone copyto "$REMOTE/$BACKUP_NAME" "$ARCHIVE"
 
-          zstd -t "$RUNNER_TEMP/nvcloud-backup.tar.zst"
+          zstd -t "$ARCHIVE"
 
           sudo tar \
             --numeric-owner \
             --same-owner \
             --same-permissions \
             --zstd \
-            -xf "$RUNNER_TEMP/nvcloud-backup.tar.zst" \
-            -C "$RUNNER_TEMP/redroid-data"
+            -xf "$ARCHIVE" \
+            -C "$DATA"
+
+          if [ -z "$(sudo find "$DATA" -mindepth 1 -print -quit)" ]; then
+            echo "RESTORE_DATA_EMPTY"
+            exit 1
+          fi
 
           echo "RESTORE_COMPLETE"
 
@@ -156,11 +167,12 @@ jobs:
           done
 
           if [ "$STATE" != "1" ]; then
-            docker logs nvcloud-android
             echo "ANDROID_BOOT_FAILED"
+            docker logs nvcloud-android
             exit 1
           fi
 
+          touch "$RUNNER_TEMP/NVCLOUD_SESSION_READY"
           echo "ANDROID_BOOT_OK"
 
       - name: Check root
@@ -236,100 +248,21 @@ jobs:
 
           echo "LAWNCHAIR_READY"
 
-      - name: Keep Cloud running and backup on exit
-        if: always()
+      - name: Keep Cloud running
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
 
-          DATA="$RUNNER_TEMP/redroid-data"
-          ARCHIVE="$RUNNER_TEMP/nvcloud-backup.tar.zst"
-          BACKUP_NAME="nvcloud-${GITHUB_RUN_ID}.tar.zst"
-          BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+          echo "NVCloud Android 13 is running."
+          echo "Session limit: 340 minutes."
 
-          backup() {
-            set +e
-            trap - EXIT
-
-            echo "=== STOP ANDROID ==="
-
-            docker stop -t 30 nvcloud-android 2>/dev/null || true
-
-            if [ ! -d "$DATA" ]; then
-              echo "NO_ANDROID_DATA"
-              return 0
-            fi
-
-            echo "=== DATA SIZE ==="
-            sudo du -sh "$DATA"
-
-            echo "=== CREATE ARCHIVE ==="
-
-            sudo tar \
-              --numeric-owner \
-              --acls \
-              --xattrs \
-              -I 'zstd -1 -T2' \
-              -cf "$ARCHIVE" \
-              -C "$DATA" .
-
-            if [ ! -s "$ARCHIVE" ]; then
-              echo "BACKUP_ARCHIVE_EMPTY"
-              return 1
-            fi
-
-            zstd -t "$ARCHIVE" || return 1
-
-            echo "=== UPLOAD BACKUP ==="
-
-            rclone copyto \
-              "$ARCHIVE" \
-              "blomp:$BLOMP_BUCKET/$BACKUP_PATH" \
-              --s3-chunk-size 100M \
-              --transfers 1 \
-              --checkers 2 \
-              --retries 3 \
-              --low-level-retries 5 \
-              || return 1
-
-            echo "=== VERIFY REMOTE SIZE ==="
-
-            LOCAL_SIZE=$(stat -c %s "$ARCHIVE")
-            REMOTE_SIZE=$(rclone lsjson \
-              "blomp:$BLOMP_BUCKET/$BACKUP_PATH" \
-              | jq -r '.[0].Size')
-
-            if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
-              echo "BACKUP_SIZE_MISMATCH"
-              return 1
-            fi
-
-            echo "$BACKUP_NAME" > "$RUNNER_TEMP/LATEST"
-
-            rclone copyto \
-              "$RUNNER_TEMP/LATEST" \
-              "blomp:$BLOMP_BUCKET/$BACKUP_DIR/LATEST" \
-              || return 1
-
-            echo "NVCloud_BACKUP_OK"
-          }
-
-          trap backup EXIT
-
-          if [ "${{ job.status }}" != "success" ]; then
-            echo "Workflow setup did not complete successfully."
-            exit 1
-          fi
-
-          echo "================================"
-          echo "NVCloud Android 13 is running"
-          echo "Session limit: 350 minutes"
-          echo "================================"
-
-          END=$((SECONDS + 5 * 60 * 60 + 50 * 60))
+          END=$((SECONDS + 340 * 60))
 
           while [ "$SECONDS" -lt "$END" ]; do
-            if ! docker inspect -f '{{.State.Running}}' nvcloud-android 2>/dev/null | grep -q true; then
+            RUNNING=$(docker inspect \
+              -f '{{.State.Running}}' nvcloud-android 2>/dev/null || echo false)
+
+            if [ "$RUNNING" != "true" ]; then
               echo "ANDROID_CONTAINER_STOPPED"
               exit 1
             fi
@@ -338,3 +271,98 @@ jobs:
           done
 
           echo "SESSION_TIME_LIMIT_REACHED"
+
+      - name: Backup Android data to Blomp
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          DATA="$RUNNER_TEMP/redroid-data"
+          ARCHIVE="$RUNNER_TEMP/nvcloud-backup.tar.zst"
+          BACKUP_NAME="nvcloud-${GITHUB_RUN_ID}.tar.zst"
+          REMOTE="blomp:$BLOMP_BUCKET/$BACKUP_DIR"
+          REMOTE_BACKUP="$REMOTE/$BACKUP_NAME"
+
+          # Do not overwrite a good backup with failed startup data.
+          if [ ! -f "$RUNNER_TEMP/NVCLOUD_SESSION_READY" ]; then
+            echo "BACKUP_SKIPPED: Android did not boot."
+            docker rm -f nvcloud-android 2>/dev/null || true
+            exit 0
+          fi
+
+          echo "=== STOP ANDROID ==="
+          docker stop -t 30 nvcloud-android 2>/dev/null || true
+
+          if [ ! -d "$DATA" ]; then
+            echo "ANDROID_DATA_MISSING"
+            exit 1
+          fi
+
+          DATA_SIZE=$(sudo du -s -B1 "$DATA" | awk '{print $1}')
+
+          echo "Android data bytes: $DATA_SIZE"
+
+          if [ "$DATA_SIZE" -lt 10485760 ]; then
+            echo "BACKUP_REFUSED: Android data is unexpectedly small."
+            exit 1
+          fi
+
+          echo "=== CREATE ARCHIVE ==="
+
+          sudo tar \
+            --numeric-owner \
+            --acls \
+            --xattrs \
+            -I 'zstd -1 -T2' \
+            -cf "$ARCHIVE" \
+            -C "$DATA" .
+
+          if [ ! -s "$ARCHIVE" ]; then
+            echo "BACKUP_ARCHIVE_EMPTY"
+            exit 1
+          fi
+
+          zstd -t "$ARCHIVE"
+
+          echo "=== UPLOAD BACKUP ==="
+
+          rclone copyto \
+            "$ARCHIVE" \
+            "$REMOTE_BACKUP" \
+            --s3-chunk-size 100M \
+            --transfers 1 \
+            --checkers 2 \
+            --retries 3 \
+            --low-level-retries 5
+
+          echo "=== VERIFY REMOTE SIZE ==="
+
+          LOCAL_SIZE=$(stat -c %s "$ARCHIVE")
+
+          REMOTE_SIZE=$(rclone lsjson "$REMOTE_BACKUP" \
+            | jq -r '.[0].Size')
+
+          if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
+            echo "BACKUP_SIZE_MISMATCH"
+            exit 1
+          fi
+
+          # Update LATEST only after archive upload and size check succeed.
+          printf '%s\n' "$BACKUP_NAME" > "$RUNNER_TEMP/LATEST"
+
+          rclone copyto \
+            "$RUNNER_TEMP/LATEST" \
+            "$REMOTE/LATEST"
+
+          echo "NVCLOUD_BACKUP_OK"
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker logs nvcloud-android 2>/dev/null || true
+          docker rm -f nvcloud-android 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/lawnchair.apk"
+          rm -f "$RUNNER_TEMP/lawnchair.html"
+          rm -f "$RUNNER_TEMP/nvcloud-backup.tar.zst"
