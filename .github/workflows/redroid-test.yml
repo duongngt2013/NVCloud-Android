@@ -16,6 +16,7 @@ jobs:
       - name: Prepare output
         shell: bash
         run: |
+          set -eux
           mkdir -p output "$RUNNER_TEMP/nvcloud"
 
       - name: Prepare BinderFS
@@ -31,7 +32,9 @@ jobs:
         shell: bash
         run: |
           set -eux
+
           mkdir -p "$RUNNER_TEMP/redroid-data"
+
           docker pull redroid/redroid:13.0.0-latest
 
           docker run -d \
@@ -53,15 +56,19 @@ jobs:
           exec > >(tee -a output/setup.log) 2>&1
 
           sudo apt-get update -qq
-          sudo apt-get install -y android-tools-adb aapt jq
+          sudo apt-get install -y android-tools-adb aapt
 
           DEVICE="127.0.0.1:5555"
+
+          echo "=== CONNECT ADB ==="
           adb connect "$DEVICE"
 
           STATE=""
+
           for i in $(seq 1 60); do
             STATE=$(adb -s "$DEVICE" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             echo "Boot check $i: $STATE"
+
             [ "$STATE" = "1" ] && break
             sleep 5
           done
@@ -72,33 +79,67 @@ jobs:
             exit 1
           fi
 
-          API="https://api.github.com/repos/LawnchairLauncher/lawnchair/releases/tags/v14.0.0-beta3"
-          RELEASE_JSON="$RUNNER_TEMP/lawnchair-release.json"
+          echo "ANDROID_BOOT_SUCCESS"
+
+          echo "=== DOWNLOAD LAWNCHAIR ==="
+
+          RELEASE_PAGE="https://github.com/LawnchairLauncher/lawnchair/releases/expanded_assets/v14.0.0-beta3"
           APK="$RUNNER_TEMP/lawnchair.apk"
+          ASSETS_HTML="$RUNNER_TEMP/lawnchair-assets.html"
 
-          curl -fsSL "$API" -o "$RELEASE_JSON"
+          curl -fLsS \
+            -A "Mozilla/5.0 NVCloud" \
+            "$RELEASE_PAGE" \
+            -o "$ASSETS_HTML"
 
-          APK_URL=$(jq -r '[.assets[] | select(.name | endswith(".apk"))][0].browser_download_url // empty' "$RELEASE_JSON")
+          APK_PATH=$(grep -oE 'href="[^"]+\.apk"' "$ASSETS_HTML" \
+            | head -n 1 \
+            | cut -d '"' -f 2)
 
-          if [ -z "$APK_URL" ]; then
+          if [ -z "$APK_PATH" ]; then
             echo "LAWNCHAIR_APK_NOT_FOUND"
             exit 1
           fi
 
-          curl -fL "$APK_URL" -o "$APK"
+          case "$APK_PATH" in
+            http://*|https://*)
+              APK_URL="$APK_PATH"
+              ;;
+            *)
+              APK_URL="https://github.com${APK_PATH}"
+              ;;
+          esac
+
+          echo "APK URL: $APK_URL"
+
+          curl -fL \
+            -A "Mozilla/5.0 NVCloud" \
+            "$APK_URL" \
+            -o "$APK"
+
+          if [ ! -s "$APK" ]; then
+            echo "APK_DOWNLOAD_FAILED"
+            exit 1
+          fi
+
+          echo "=== APK DOWNLOADED ==="
+          ls -lh "$APK"
 
           echo "=== INSTALL APK ==="
           adb -s "$DEVICE" install -r "$APK"
 
-          echo "=== REMOVE TEMPORARY APK ==="
-          rm -f "$APK" "$RELEASE_JSON"
+          echo "=== DELETE TEMPORARY APK ==="
+          rm -f "$APK" "$ASSETS_HTML"
 
           echo "=== SET DEFAULT HOME ==="
           adb -s "$DEVICE" shell cmd package set-home-activity --user 0 app.lawnchair/.LawnchairLauncher || true
 
           echo "=== OPEN LAWNCHAIR ==="
           adb -s "$DEVICE" shell am force-stop app.lawnchair
-          adb -s "$DEVICE" shell am start -n app.lawnchair/.LawnchairLauncher
+
+          adb -s "$DEVICE" shell am start \
+            -n app.lawnchair/.LawnchairLauncher
+
           sleep 5
 
           echo "=== SCREEN BEFORE SETUP ==="
@@ -107,6 +148,7 @@ jobs:
           echo "=== TAP SETUP BUTTON ==="
           adb -s "$DEVICE" shell input tap 105 110
           sleep 3
+
           adb -s "$DEVICE" shell input tap 105 110
           sleep 5
 
@@ -123,7 +165,8 @@ jobs:
           adb -s "$DEVICE" exec-out screencap -p > output/02-after-setup.png
 
           echo "=== LAWNCHAIR PACKAGE ==="
-          adb -s "$DEVICE" shell dumpsys package app.lawnchair | grep -m 5 "versionName" || true
+          adb -s "$DEVICE" shell dumpsys package app.lawnchair \
+            | grep -m 5 "versionName" || true
 
           echo "LAWNCHAIR_SETUP_TEST_COMPLETE"
 
@@ -154,6 +197,8 @@ jobs:
         if: always()
         shell: bash
         run: |
+          docker logs nvcloud-android 2>/dev/null || true
           docker rm -f nvcloud-android 2>/dev/null || true
+
           rm -f "$RUNNER_TEMP/lawnchair.apk"
-          rm -f "$RUNNER_TEMP/lawnchair-release.json"
+          rm -f "$RUNNER_TEMP/lawnchair-assets.html"
